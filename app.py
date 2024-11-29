@@ -19,6 +19,7 @@ from typing import List, Optional, Dict
 import uuid
 from fpdf import FPDF
 import matplotlib.pyplot as plt
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -169,6 +170,7 @@ class VideoProcessor:
     def translate_text(self, text: str, target_language: str) -> str:
         """Translate text to target language using OpenAI"""
         try:
+            logging.info(f"Starting translation to {target_language}")
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -180,79 +182,95 @@ class VideoProcessor:
                 ],
                 response_format={"type": "text"}
             )
-            return response.choices[0].message.content.strip()
+            translated = response.choices[0].message.content.strip()
+            logging.debug(f"Translation completed successfully: {text[:50]}... -> {translated[:50]}...")
+            return translated
         except Exception as e:
-            print(f"Translation error: {e}")
+            logging.error(f"Translation error: {str(e)}", exc_info=True)
             return text
 
     def detect_language(self, text: str) -> str:
         """Detect the language of the input text"""
         try:
+            logging.info("Starting language detection")
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "system",
-                        "content": "Detect the language of the following text and respond with the language code only (e.g., 'en-US', 'ms-MY', etc.)"
+                        "content": "Detect the language of the following text and respond with the language code only"
                     },
                     {"role": "user", "content": text}
                 ],
                 response_format={"type": "text"}
             )
-            return response.choices[0].message.content.strip()
+            detected = response.choices[0].message.content.strip()
+            logging.debug(f"Language detected: {detected}")
+            return detected
         except Exception as e:
-            print(f"Language detection error: {e}")
-            return "en-US"  # Default to English if detection fails
+            logging.error(f"Language detection error: {str(e)}", exc_info=True)
+            return "en-US"
 
     def extract_frames(self, video_path, sample_rate=1):
         """Extract frames from video with enhanced metadata"""
-        frames = []
-        timestamps = []
-        frame_images = []
-        frame_numbers = []
-        
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_interval = int(fps * sample_rate)
-        duration = total_frames / fps if fps > 0 else 0
-        
-        video_metadata = {
-            'fps': fps,
-            'duration': duration,
-            'total_frames': total_frames,
-            'frame_interval': frame_interval
-        }
-        
-        if fps <= 0:
-            fps = 30  # Default fallback
+        logging.info(f"Starting frame extraction from {video_path}")
+        try:
+            frames = []
+            timestamps = []
+            frame_images = []
+            frame_numbers = []
             
-        current_frame = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            if current_frame % frame_interval == 0:
-                timestamp = current_frame / fps
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # Store frame data
-                frame_images.append(frame_rgb)
-                _, buffer = cv2.imencode('.jpg', frame)
-                base64_frame = base64.b64encode(buffer).decode('utf-8')
-                frames.append(base64_frame)
-                timestamps.append(timestamp)
-                frame_numbers.append(current_frame)
-                
-            current_frame += 1
+            cap = cv2.VideoCapture(video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
-        cap.release()
-        return frames, timestamps, frame_images, video_metadata, frame_numbers
+            logging.debug(f"Video properties - FPS: {fps}, Total frames: {total_frames}")
+            
+            frame_interval = int(fps * sample_rate)
+            duration = total_frames / fps if fps > 0 else 0
+            
+            video_metadata = {
+                'fps': fps,
+                'duration': duration,
+                'total_frames': total_frames,
+                'frame_interval': frame_interval
+            }
+            
+            if fps <= 0:
+                fps = 30  # Default fallback
+            
+            current_frame = 0
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                if current_frame % frame_interval == 0:
+                    timestamp = current_frame / fps
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    # Store frame data
+                    frame_images.append(frame_rgb)
+                    _, buffer = cv2.imencode('.jpg', frame)
+                    base64_frame = base64.b64encode(buffer).decode('utf-8')
+                    frames.append(base64_frame)
+                    timestamps.append(timestamp)
+                    frame_numbers.append(current_frame)
+                
+                current_frame += 1
+            
+            cap.release()
+            logging.info(f"Frame extraction completed. Extracted {len(frames)} frames")
+            return frames, timestamps, frame_images, video_metadata, frame_numbers
+        
+        except Exception as e:
+            logging.error(f"Frame extraction error: {str(e)}", exc_info=True)
+            raise
 
     def analyze_frame(self, frame_base64: str, timestamp: float) -> str:
-        """Analyze frame using OpenAI Vision with structured output"""
+        """Analyze frame using OpenAI Vision"""
         try:
+            logging.debug(f"Analyzing frame at timestamp {timestamp:.2f}")
             completion = self.client.beta.chat.completions.parse(
                 model="gpt-4o-mini",
                 messages=[
@@ -284,6 +302,7 @@ class VideoProcessor:
             frame_analysis = completion.choices[0].message.parsed
             
             # Convert to JSON string to maintain compatibility with existing code
+            logging.debug(f"Frame analysis completed for timestamp {timestamp:.2f}")
             return json.dumps({
                 "description": frame_analysis.description,
                 "objects_detected": frame_analysis.objects_detected,
@@ -291,6 +310,7 @@ class VideoProcessor:
             })
             
         except Exception as e:
+            logging.error(f"Frame analysis error at timestamp {timestamp:.2f}: {str(e)}", exc_info=True)
             if isinstance(e, LengthFinishReasonError):
                 # Handle token limit error
                 return json.dumps({
@@ -307,52 +327,117 @@ class VideoProcessor:
                 })
 
     def extract_audio_with_translations(self, video_path: str) -> dict:
-        """Extract audio and generate translations"""
+        """Extract audio and generate translations with chunking support"""
         try:
+            logging.info(f"Starting audio extraction from {video_path}")
+            # Extract audio from video
             video = VideoFileClip(video_path)
-            audio_path = tempfile.mktemp(suffix='.mp3')
-            video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+            audio_duration = video.duration
             
-            with open(audio_path, 'rb') as audio_file:
-                transcript = self.client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    response_format="verbose_json",
-                    timestamp_granularities=["segment", "word"]
-                )
+            # Parameters for chunking
+            chunk_duration = 300  # 5 minutes per chunk
+            chunk_overlap = 10    # 10 seconds overlap between chunks
+            overlap_threshold = 2  # Seconds threshold for removing overlapping segments
             
-            os.unlink(audio_path)
+            # Calculate number of chunks needed
+            num_chunks = int(np.ceil(audio_duration / (chunk_duration - chunk_overlap)))
+            logging.info(f"Processing {num_chunks} audio chunks")
             
-            # Process translations
-            subtitles = {}
-            source_language = self.detect_language(transcript.text)
-            subtitles[source_language] = []
-            
-            # Convert original transcript to our format
-            for segment in transcript.segments:
-                subtitles[source_language].append({
-                    "inpoint": str(segment.start),
-                    "outpoint": str(segment.end),
-                    "text": segment.text
-                })
-            
-            # Generate translations
-            for lang_code in self.supported_languages.keys():
-                if lang_code != source_language:
-                    subtitles[lang_code] = []
-                    for segment in transcript.segments:
-                        translated_text = self.translate_text(segment.text, self.supported_languages[lang_code])
-                        subtitles[lang_code].append({
-                            "inpoint": str(segment.start),
-                            "outpoint": str(segment.end),
-                            "text": translated_text
+            # Initialize temporary directory for chunks
+            with tempfile.TemporaryDirectory() as temp_dir:
+                chunk_segments = []
+                
+                # Process audio in chunks
+                for i in range(num_chunks):
+                    start_time = i * (chunk_duration - chunk_overlap)
+                    end_time = min(start_time + chunk_duration, audio_duration)
+                    
+                    logging.info(f"Processing chunk {i+1}/{num_chunks} ({start_time:.1f}s - {end_time:.1f}s)")
+                    
+                    try:
+                        # Extract chunk
+                        chunk = video.subclip(start_time, end_time)
+                        chunk_path = os.path.join(temp_dir, f'chunk_{i}.mp3')
+                        chunk.audio.write_audiofile(chunk_path, verbose=False, logger=None)
+                        
+                        # Process chunk
+                        with open(chunk_path, 'rb') as audio_file:
+                            try:
+                                response = self.client.audio.transcriptions.create(
+                                    model="whisper-1",
+                                    file=audio_file,
+                                    response_format="verbose_json",
+                                    timestamp_granularities=["segment"]
+                                )
+                                
+                                # Extract and adjust segments
+                                for segment in response.segments:
+                                    chunk_segments.append({
+                                        'start': segment.start + start_time,
+                                        'end': segment.end + start_time,
+                                        'text': segment.text
+                                    })
+                                    
+                            except Exception as e:
+                                logging.error(f"Error processing chunk {i}: {str(e)}")
+                                continue
+                                
+                    except Exception as e:
+                        logging.error(f"Error extracting chunk {i}: {str(e)}")
+                        continue
+                
+                # Sort segments by start time
+                chunk_segments.sort(key=lambda x: x['start'])
+                
+                # Remove overlapping segments
+                final_segments = []
+                if chunk_segments:
+                    current_segment = chunk_segments[0]
+                    for next_segment in chunk_segments[1:]:
+                        if next_segment['start'] - current_segment['end'] > -overlap_threshold:
+                            final_segments.append(current_segment)
+                            current_segment = next_segment
+                    final_segments.append(current_segment)
+                
+                # Create subtitles dictionary with proper format
+                subtitles = {}
+                if final_segments:
+                    # Detect source language from combined text
+                    full_text = " ".join(seg['text'] for seg in final_segments)
+                    source_language = self.detect_language(full_text)
+                    subtitles[source_language] = []
+                    
+                    # Format original transcript
+                    for segment in final_segments:
+                        subtitles[source_language].append({
+                            "inpoint": str(timedelta(seconds=int(segment['start']))),
+                            "outpoint": str(timedelta(seconds=int(segment['end']))),
+                            "text": segment['text']
                         })
-            
-            return subtitles
-            
+                    
+                    # Generate translations
+                    for lang_code in self.supported_languages.keys():
+                        if lang_code != source_language:
+                            subtitles[lang_code] = []
+                            for segment in final_segments:
+                                translated_text = self.translate_text(
+                                    segment['text'], 
+                                    self.supported_languages[lang_code]
+                                )
+                                subtitles[lang_code].append({
+                                    "inpoint": str(timedelta(seconds=int(segment['start']))),
+                                    "outpoint": str(timedelta(seconds=int(segment['end']))),
+                                    "text": translated_text
+                                })
+                
+                video.close()
+                logging.info("Audio extraction and translation completed successfully")
+                return subtitles
+                
         except Exception as e:
-            print(f"Error in audio extraction: {e}")
+            logging.error(f"Error in audio extraction: {str(e)}", exc_info=True)
             return {"error": str(e)}
+
 
 class MetadataManager:
     def __init__(self, api_key):
@@ -363,71 +448,81 @@ class MetadataManager:
         
     def create_metadata_df(self, frame_metadata, timestamps, audio_data, video_metadata, frame_numbers):
         """Create structured metadata with enhanced organization"""
-        self.video_metadata = video_metadata
-        
-        # Parse frame metadata
-        parsed_metadata = []
-        for metadata_str in frame_metadata:
-            try:
-                metadata = json.loads(metadata_str)
-                parsed_metadata.append(metadata)
-            except:
-                parsed_metadata.append({
-                    "description": metadata_str,
-                    "objects_detected": [],
-                    "scene_type": "unknown"
-                })
-        
-        # Create base DataFrame
-        self.metadata_df = pd.DataFrame({
-            'frame_number': frame_numbers,
-            'timestamp': timestamps,
-            'formatted_time': [str(timedelta(seconds=int(t))) for t in timestamps],
-            'frame_description': [m['description'] for m in parsed_metadata],
-            'objects_detected': [m['objects_detected'] for m in parsed_metadata],
-            'scene_type': [m['scene_type'] for m in parsed_metadata]
-        })
-        
-        # Create event data
-        event_data = []
-        for _, row in self.metadata_df.iterrows():
-            event_data.append({
-                "eventID": row['frame_description'],
-                "eventImageURL": "",
-                "inpoint": float(row['timestamp']),
-                "outpoint": float(row['timestamp'])
+        logging.info("Starting metadata DataFrame creation")
+        try:
+            self.video_metadata = video_metadata
+            
+            # Parse frame metadata
+            logging.debug("Parsing frame metadata")
+            parsed_metadata = []
+            for metadata_str in frame_metadata:
+                try:
+                    metadata = json.loads(metadata_str)
+                    parsed_metadata.append(metadata)
+                except:
+                    logging.warning(f"Failed to parse metadata: {metadata_str[:100]}...")
+                    parsed_metadata.append({
+                        "description": metadata_str,
+                        "objects_detected": [],
+                        "scene_type": "unknown"
+                    })
+            
+            # Create base DataFrame
+            self.metadata_df = pd.DataFrame({
+                'frame_number': frame_numbers,
+                'timestamp': timestamps,
+                'formatted_time': [str(timedelta(seconds=int(t))) for t in timestamps],
+                'frame_description': [m['description'] for m in parsed_metadata],
+                'objects_detected': [m['objects_detected'] for m in parsed_metadata],
+                'scene_type': [m['scene_type'] for m in parsed_metadata]
             })
-        
-        # Create source data with required structure
-        source_data = {
-            "description": video_metadata.get('description', ''),
-            "title": None,
-            "file_id": int(time.time()),
-            "lls_kv_id": int(str(int(time.time()))[-8:]),
-            "thumbnail": f"{str(uuid.uuid4())[:8]}.png",
-            "clip_name": f"FIN-{str(int(time.time()))[-2:]}",
-            "clip_title": str(int(time.time())),
-            "duration": self.format_duration(video_metadata['duration']),
-            "proxy_uri": "",
-            "relative_path": "//",
-            "tracks": {
-                "caption": {
-                    "eventData": event_data
-                }
-            },
-            "subtitles": audio_data if isinstance(audio_data, dict) else {}
-        }
-        
-        # Create complete metadata structure
-        self.structured_data = {
-            "index": str(int(time.time())),
-            "id": str(uuid.uuid4()),
-            "version": 1,
-            "seq_no": int(time.time()),
-            "primary_term": 1,
-            "found": True,
-            "source": source_data
-        }
+            
+            # Create event data
+            event_data = []
+            for _, row in self.metadata_df.iterrows():
+                event_data.append({
+                    "eventID": row['frame_description'],
+                    "eventImageURL": "",
+                    "inpoint": float(row['timestamp']),
+                    "outpoint": float(row['timestamp'])
+                })
+            
+            # Create source data with required structure
+            source_data = {
+                "description": video_metadata.get('description', ''),
+                "title": None,
+                "file_id": int(time.time()),
+                "lls_kv_id": int(str(int(time.time()))[-8:]),
+                "thumbnail": f"{str(uuid.uuid4())[:8]}.png",
+                "clip_name": f"FIN-{str(int(time.time()))[-2:]}",
+                "clip_title": str(int(time.time())),
+                "duration": self.format_duration(video_metadata['duration']),
+                "proxy_uri": "",
+                "relative_path": "//",
+                "tracks": {
+                    "caption": {
+                        "eventData": event_data
+                    }
+                },
+                "subtitles": audio_data if isinstance(audio_data, dict) else {}
+            }
+            
+            # Create complete metadata structure
+            self.structured_data = {
+                "index": str(int(time.time())),
+                "id": str(uuid.uuid4()),
+                "version": 1,
+                "seq_no": int(time.time()),
+                "primary_term": 1,
+                "found": True,
+                "source": source_data
+            }
+            
+            logging.info("Metadata DataFrame creation completed successfully")
+            
+        except Exception as e:
+            logging.error("Error creating metadata DataFrame", exc_info=True)
+            raise
 
     def get_event_data(self):
         """Safely get event data from structured data"""
@@ -824,7 +919,7 @@ def main():
     col1, col2 = st.columns([2, 1])
     with col1:
         api_key = st.text_input(
-            "Enter OpenAI API Key:",
+            "Enter BlacX API Key:",
             value=st.session_state.OPENAI_API_KEY,
             type="password",
             key="api_key_input"
