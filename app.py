@@ -926,7 +926,7 @@ def main():
         )
     
     if not api_key:
-        st.warning("⚠️ Please enter your OpenAI API key to continue.")
+        st.warning("⚠️ Please enter your BlacX API key to continue.")
         return
     
     st.session_state.OPENAI_API_KEY = api_key
