@@ -700,70 +700,80 @@ class VideoProcessor:
 
     def extract_audio_with_translations(self, video_path: str) -> dict:
         """Extract audio and generate translations with enhanced visualization"""
+        video = None
         try:
             logging.info(f"Starting audio extraction from {video_path}")
             self.visualizer.log_processing_step("Audio Processing", "Initializing audio extraction...")
             
             # Extract audio from video
             video = VideoFileClip(video_path)
+            if video.audio is None:
+                return {"error": "No audio found in video"}
+                
             audio_duration = video.duration
             
-            # Convert audio to numpy array and ensure proper sequence type
-            audio_array = video.audio.to_soundarray()
-            
-            # Ensure audio_array is 1D and convert to sequence type
-            if audio_array.ndim > 1:
-                # Convert stereo to mono by taking mean of channels
-                waveform_data = np.mean(audio_array, axis=1)
-            else:
-                waveform_data = audio_array
+            try:
+                # Convert audio to numpy array with explicit list conversion
+                audio_array = list(video.audio.iter_frames())  # Use iter_frames() instead of to_soundarray()
+                audio_array = np.array(audio_array)
                 
-            # Convert to list to ensure sequence type
-            waveform_data = waveform_data.tolist()
-            
-            # Calculate FFT and ensure sequence types
-            fft_data = np.abs(np.fft.rfft(waveform_data))
-            freqs = np.fft.rfftfreq(len(waveform_data), 1/video.audio.fps)
-            
-            # Convert FFT data to lists for DataFrame creation
-            fft_data = fft_data.tolist()
-            freqs = freqs.tolist()
-            
-            # Create time sequence for waveform
-            time_sequence = np.linspace(0, audio_duration, len(waveform_data)).tolist()
-            
-            # Create DataFrames with explicit sequence types
-            spectrum_df = pd.DataFrame({
-                'frequency': freqs,
-                'magnitude': fft_data
-            })
-            
-            waveform_df = pd.DataFrame({
-                'time': time_sequence,
-                'amplitude': waveform_data
-            })
-            
-            # Visualize audio data
-            self.visualizer.visualize_audio_processing(waveform_df, spectrum_df)
+                # Convert stereo to mono if needed
+                if len(audio_array.shape) > 1:
+                    waveform_data = [float(x) for x in np.mean(audio_array, axis=1)]
+                else:
+                    waveform_data = [float(x) for x in audio_array]
+                
+                # Calculate FFT with explicit list conversion
+                fft_result = np.fft.rfft(waveform_data)
+                fft_data = [float(x) for x in np.abs(fft_result)]
+                freqs = [float(x) for x in np.fft.rfftfreq(len(waveform_data), 1/video.audio.fps)]
+                
+                # Create time points as explicit list
+                time_points = [float(x) for x in np.linspace(0, audio_duration, len(waveform_data))]
+                
+                # Create DataFrames with guaranteed sequences
+                waveform_df = pd.DataFrame({
+                    'time': time_points,
+                    'amplitude': waveform_data
+                })
+                
+                spectrum_df = pd.DataFrame({
+                    'frequency': freqs,
+                    'magnitude': fft_data
+                })
+                
+                # Ensure DataFrames are not empty
+                if waveform_df.empty or spectrum_df.empty:
+                    raise ValueError("Generated DataFrames are empty")
+                
+                # Visualize audio data
+                self.visualizer.visualize_audio_processing(waveform_df, spectrum_df)
+                
+            except Exception as audio_process_error:
+                logging.error(f"Error processing audio data: {str(audio_process_error)}")
+                self.visualizer.log_processing_step("Audio Processing Error", 
+                    f"Error processing audio data: {str(audio_process_error)}", 
+                    status="error")
+                return {"error": f"Audio processing error: {str(audio_process_error)}"}
             
             # Process audio in chunks
             chunk_duration = 300
             chunk_overlap = 10
-            overlap_threshold = 0.5  # Define overlap_threshold
+            overlap_threshold = 0.5
             num_chunks = int(np.ceil(audio_duration / (chunk_duration - chunk_overlap)))
-
+            
             with tempfile.TemporaryDirectory() as temp_dir:
                 chunk_segments = []
                 
                 for i in range(num_chunks):
-                    start_time = i * (chunk_duration - chunk_overlap)
-                    end_time = min(start_time + chunk_duration, audio_duration)
-                    
-                    self.visualizer.update_progress(i + 1, num_chunks, "Audio Chunk Processing")
-                    self.visualizer.log_processing_step("Audio Chunk", 
-                        f"Processing chunk {i+1}/{num_chunks} ({start_time:.1f}s - {end_time:.1f}s)")
-                    
                     try:
+                        start_time = i * (chunk_duration - chunk_overlap)
+                        end_time = min(start_time + chunk_duration, audio_duration)
+                        
+                        self.visualizer.update_progress(i + 1, num_chunks, "Audio Chunk Processing")
+                        self.visualizer.log_processing_step("Audio Chunk", 
+                            f"Processing chunk {i+1}/{num_chunks} ({start_time:.1f}s - {end_time:.1f}s)")
+                        
                         chunk = video.subclip(start_time, end_time)
                         chunk_path = os.path.join(temp_dir, f'chunk_{i}.mp3')
                         chunk.audio.write_audiofile(chunk_path, verbose=False, logger=None)
@@ -782,73 +792,39 @@ class VideoProcessor:
                                     'end': segment.end + start_time,
                                     'text': segment.text
                                 })
-                                
-                            self.visualizer.show_output(
-                                f"Transcribed Segment {i+1}:\n" + 
-                                json.dumps(chunk_segments[-1], indent=2)
-                            )
-                            
-                    except Exception as e:
-                        self.visualizer.log_processing_step("Error", 
-                            f"Error in chunk {i}: {str(e)}", 
+                        
+                    except Exception as chunk_error:
+                        logging.error(f"Error processing chunk {i}: {str(chunk_error)}")
+                        self.visualizer.log_processing_step("Chunk Error", 
+                            f"Error in chunk {i}: {str(chunk_error)}", 
                             status="error")
                         continue
                 
-                # Sort segments by start time
-                chunk_segments.sort(key=lambda x: x['start'])
-                
-                # Remove overlapping segments
-                final_segments = []
-                if chunk_segments:
-                    current_segment = chunk_segments[0]
-                    for next_segment in chunk_segments[1:]:
-                        if next_segment['start'] - current_segment['end'] > -overlap_threshold:
-                            final_segments.append(current_segment)
-                            current_segment = next_segment
-                    final_segments.append(current_segment)
-                
-                # Create subtitles dictionary with proper format
-                subtitles = {}
-                if final_segments:
-                    # Detect source language from combined text
-                    full_text = " ".join(seg['text'] for seg in final_segments)
-                    source_language = self.detect_language(full_text)
-                    subtitles[source_language] = []
+                try:
+                    if chunk_segments:
+                        # Process transcription
+                        return self.process_transcription(chunk_segments)
+                    else:
+                        return {"error": "No segments processed successfully"}
+                        
+                except Exception as process_error:
+                    logging.error(f"Error processing transcription: {str(process_error)}")
+                    return {"error": f"Transcription processing error: {str(process_error)}"}
                     
-                    # Format original transcript
-                    for segment in final_segments:
-                        subtitles[source_language].append({
-                            "inpoint": str(timedelta(seconds=int(segment['start']))),
-                            "outpoint": str(timedelta(seconds=int(segment['end']))),
-                            "text": segment['text']
-                        })
-                    
-                    # Generate translations
-                    for lang_code in self.supported_languages.keys():
-                        if lang_code != source_language:
-                            subtitles[lang_code] = []
-                            for segment in final_segments:
-                                translated_text = self.translate_text(
-                                    segment['text'], 
-                                    self.supported_languages[lang_code]
-                                )
-                                subtitles[lang_code].append({
-                                    "inpoint": str(timedelta(seconds=int(segment['start']))),
-                                    "outpoint": str(timedelta(seconds=int(segment['end']))),
-                                    "text": translated_text
-                                })
-                
-                video.close()
-                logging.info("Audio extraction and translation completed successfully")
-                return {}
-            
-        except Exception as e:
-            logging.error(f"Audio extraction error: {str(e)}", exc_info=True)
+        except Exception as main_error:
+            logging.error(f"Main audio extraction error: {str(main_error)}")
             self.visualizer.log_processing_step("Error", 
-                f"Error in audio extraction: {str(e)}", 
-            status="error")
-        return {"error": str(e)}
-
+                f"Error in audio extraction: {str(main_error)}", 
+                status="error")
+            return {"error": str(main_error)}
+            
+        finally:
+            # Clean up video object
+            if video is not None:
+                try:
+                    video.close()
+                except Exception as close_error:
+                    logging.error(f"Error closing video: {str(close_error)}")
     def process_transcription(self, chunk_segments):
         """Process transcription and generate translations with visualization"""
         try:
@@ -1199,7 +1175,7 @@ def create_video_player(video_file, metadata_manager):
 
 def create_metadata_viewer(metadata_manager):
     """Enhanced metadata viewer with structured data"""
-    tabs = st.tabs(["Timeline", "Structured Data", "Subtitles", "Export"])
+    tabs = st.tabs(["Timeline", "Structured Data", "Subtitles"])
     
     with tabs[0]:
         if metadata_manager.metadata_df is not None:
@@ -1261,94 +1237,116 @@ def create_metadata_viewer(metadata_manager):
             st.info("No subtitle languages available")
 
 def create_analytics_view(metadata_manager):
-    """Enhanced analytics view with real-time visualization"""
-    visualizer = ProcessingVisualizer()
-    
-    try:
-        visualizer.log_processing_step("Analytics", "Generating video analytics...")
+        """Enhanced analytics view with real-time visualization"""
+        visualizer = ProcessingVisualizer()
         
-        # Calculate and visualize basic metrics
-        metrics_data = {
-            "duration": metadata_manager.structured_data['source']['duration'],
-            "total_scenes": len(metadata_manager.structured_data['source']['tracks']['caption']['eventData']),
-            "available_languages": len(metadata_manager.get_subtitle_languages()),
-            "total_objects_detected": sum(len(objects) for objects in metadata_manager.metadata_df['objects_detected'])
-        }
-        
-        visualizer.visualize_analytics(metrics_data)
-        
-        # Generate and visualize scene analysis
-        visualizer.log_processing_step("Analytics", "Analyzing scene distribution...")
-        scene_types = metadata_manager.metadata_df['scene_type'].value_counts()
-        scene_fig = px.pie(
-            values=scene_types.values,
-            names=scene_types.index,
-            title="Scene Type Distribution"
-        )
-        st.plotly_chart(scene_fig, use_container_width=True)
-        
-        # Generate and visualize object timeline
-        visualizer.log_processing_step("Analytics", "Creating object detection timeline...")
-        object_timeline = []
-        for _, row in metadata_manager.metadata_df.iterrows():
-            for obj in row['objects_detected']:
-                object_timeline.append({
-                    'timestamp': row['formatted_time'],
-                    'object': obj
-                })
-        
-        if object_timeline:
-            df_timeline = pd.DataFrame(object_timeline)
-            timeline_fig = px.scatter(
-                df_timeline,
-                x='timestamp',
-                y='object',
-                title="Object Appearances Over Time",
-                color='object'
-            )
-            st.plotly_chart(timeline_fig, use_container_width=True)
-        
-        # Generate advanced analytics
-        visualizer.log_processing_step("Analytics", "Calculating advanced metrics...")
-        
-        # Scene complexity analysis
-        scene_complexity = metadata_manager.metadata_df.apply(
-            lambda x: len(x['objects_detected']),
-            axis=1
-        )
-        
-        complexity_fig = px.line(
-            x=metadata_manager.metadata_df['formatted_time'],
-            y=scene_complexity,
-            title="Scene Complexity Over Time"
-        )
-        st.plotly_chart(complexity_fig, use_container_width=True)
-        
-        # Display summary metrics
-        st.markdown("### 📊 Summary Metrics")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Total Duration", metrics_data['duration'])
-        with col2:
-            st.metric("Total Scenes", metrics_data['total_scenes'])
-        with col3:
-            st.metric("Languages", metrics_data['available_languages'])
-        with col4:
-            st.metric("Objects Detected", metrics_data['total_objects_detected'])
+        try:
+            visualizer.log_processing_step("Analytics", "Generating video analytics...")
             
-        visualizer.log_processing_step("Analytics", 
-            "Analytics generation completed",
-            status="completed"
-        )
-        
-    except Exception as e:
-        visualizer.log_processing_step("Error", 
-            f"Analytics error: {str(e)}",
-            status="error"
-        )
-        st.error(f"Error generating analytics: {str(e)}")
-
+            # Calculate and prepare basic metrics as DataFrame
+            metrics_data = pd.DataFrame({
+                'Metric': ['Duration', 'Total Scenes', 'Available Languages', 'Total Objects'],
+                'Value': [
+                    metadata_manager.structured_data['source']['duration'],
+                    len(metadata_manager.structured_data['source']['tracks']['caption']['eventData']),
+                    len(metadata_manager.get_subtitle_languages()),
+                    sum(len(objects) for objects in metadata_manager.metadata_df['objects_detected'])
+                ]
+            })
+            
+            # Create metrics bar chart
+            metrics_fig = px.bar(
+                metrics_data,
+                x='Metric',
+                y='Value',
+                title="Content Analysis Overview",
+                labels={'Value': 'Count', 'Metric': 'Metric Type'}
+            )
+            st.plotly_chart(metrics_fig, use_container_width=True)
+            
+            # Generate and visualize scene analysis
+            visualizer.log_processing_step("Analytics", "Analyzing scene distribution...")
+            scene_types = metadata_manager.metadata_df['scene_type'].value_counts().reset_index()
+            scene_types.columns = ['Scene Type', 'Count']
+            
+            scene_fig = px.pie(
+                scene_types,
+                values='Count',
+                names='Scene Type',
+                title="Scene Type Distribution"
+            )
+            st.plotly_chart(scene_fig, use_container_width=True)
+            
+            # Generate and visualize object timeline
+            visualizer.log_processing_step("Analytics", "Creating object detection timeline...")
+            object_timeline = []
+            for idx, row in metadata_manager.metadata_df.iterrows():
+                for obj in row['objects_detected']:
+                    object_timeline.append({
+                        'timestamp': row['formatted_time'],
+                        'object': obj
+                    })
+            
+            if object_timeline:
+                df_timeline = pd.DataFrame(object_timeline)
+                timeline_fig = px.scatter(
+                    df_timeline,
+                    x='timestamp',
+                    y='object',
+                    title="Object Appearances Over Time",
+                    color='object'
+                )
+                st.plotly_chart(timeline_fig, use_container_width=True)
+            
+            # Scene complexity analysis
+            scene_complexity = pd.DataFrame({
+                'Time': metadata_manager.metadata_df['formatted_time'],
+                'Complexity': metadata_manager.metadata_df.apply(
+                    lambda x: len(x['objects_detected']),
+                    axis=1
+                )
+            })
+            
+            complexity_fig = px.line(
+                scene_complexity,
+                x='Time',
+                y='Complexity',
+                title="Scene Complexity Over Time"
+            )
+            st.plotly_chart(complexity_fig, use_container_width=True)
+            
+            # Display summary metrics
+            st.markdown("### 📊 Summary Metrics")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            metrics_display = {
+                'Duration': metadata_manager.structured_data['source']['duration'],
+                'Total Scenes': len(metadata_manager.structured_data['source']['tracks']['caption']['eventData']),
+                'Languages': len(metadata_manager.get_subtitle_languages()),
+                'Objects Detected': sum(len(objects) for objects in metadata_manager.metadata_df['objects_detected'])
+            }
+            
+            with col1:
+                st.metric("Total Duration", metrics_display['Duration'])
+            with col2:
+                st.metric("Total Scenes", metrics_display['Total Scenes'])
+            with col3:
+                st.metric("Languages", metrics_display['Languages'])
+            with col4:
+                st.metric("Objects Detected", metrics_display['Objects Detected'])
+                
+            visualizer.log_processing_step("Analytics", 
+                "Analytics generation completed",
+                status="completed"
+            )
+            
+        except Exception as e:
+            logging.error(f"Analytics error: {str(e)}", exc_info=True)
+            visualizer.log_processing_step("Error", 
+                f"Analytics error: {str(e)}",
+                status="error"
+            )
+            st.error(f"Error generating analytics: {str(e)}")
 def create_analytics_report(metadata_manager):
     """Create downloadable PDF report of analytics"""
     st.markdown("### Generate PDF Report")
