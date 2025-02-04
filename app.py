@@ -583,16 +583,45 @@ class VideoProcessor:
             logging.error(f"Language detection error: {str(e)}", exc_info=True)
             return "en-US"
 
-    def extract_frames(self, video_path, sample_rate=1):
-        """Extract frames from video with enhanced metadata"""
-        logging.info(f"Starting frame extraction from {video_path}")
+    def extract_frames(self, file_path, sample_rate=1):
+        """Extract frames from video or process image with enhanced metadata"""
+        logging.info(f"Starting media extraction from {file_path}")
         try:
             frames = []
             timestamps = []
             frame_images = []
             frame_numbers = []
             
-            cap = cv2.VideoCapture(video_path)
+            # Check if input is an image by trying to read it directly with cv2
+            image = cv2.imread(file_path)
+            if image is not None:
+                # Handle single image
+                frame_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                _, buffer = cv2.imencode('.jpg', image)
+                base64_frame = base64.b64encode(buffer).decode('utf-8')
+                
+                # Create single frame metadata
+                frames = [base64_frame]
+                timestamps = [0.0]  # Single timestamp at 0
+                frame_images = [frame_rgb]
+                frame_numbers = [0]
+                
+                video_metadata = {
+                    'fps': 1,
+                    'duration': 0,
+                    'total_frames': 1,
+                    'frame_interval': 1,
+                    'is_image': True
+                }
+                
+                logging.info("Image processing completed")
+                return frames, timestamps, frame_images, video_metadata, frame_numbers
+                
+            # If not an image, process as video (existing video logic)
+            cap = cv2.VideoCapture(file_path)
+            if not cap.isOpened():
+                raise ValueError("Unable to open media file")
+            
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
@@ -1463,9 +1492,9 @@ def main():
     # File Upload
     with col1:
         uploaded_file = st.file_uploader(
-            "📁 Upload Video (MP4, AVI)", 
-            type=['mp4', 'avi'],
-            help="Upload a video file for analysis"
+            "📁 Upload Media (MP4, AVI, JPG, PNG)", 
+            type=['mp4', 'avi', 'jpg', 'jpeg', 'png'],
+            help="Upload a video or image file for analysis"
         )
     
     if uploaded_file:
